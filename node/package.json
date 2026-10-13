@@ -1,0 +1,11 @@
+{
+  "name": "ai-free-node",
+  "version": "2.0.0",
+  "description": "Ai-Free Unified AI Gateway — smart Node.js runtime (zero dependencies)",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test \"tests/*.test.js\""
+  },
+  "engines": { "node": ">=22" }
+}
