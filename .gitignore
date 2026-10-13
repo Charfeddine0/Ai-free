@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 data/*.db
+node/data/*.db
+*.db-journal
 .env
 dist/
 build/
