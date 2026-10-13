@@ -1,0 +1,9 @@
+services:
+  ai-free:
+    build: .
+    ports: ["8080:8080"]
+    volumes: ["./data:/srv/data"]
+    environment:
+      MASTER_KEY: "${MASTER_KEY:-ai-free-change-me-32bytes-minimum!}"
+      # لربط خدمة متصفح WebAI2API الحقيقية (foxhui) كمحرّك خارجي:
+      # WEBAI_ENGINE_URL: "http://webai:8081"

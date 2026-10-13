@@ -1,0 +1,10 @@
+{
+  "note_ar": "انسخ إلى config.json وعدّل. الرموز تُشفر AES-256 عند الإضافة عبر الواجهة.",
+  "accounts_seed": [
+    {"provider": "deepseek", "label": "DeepSeek-1", "token": "PASTE_DEEPSEEK_USER_TOKEN", "base_cooldown": 15},
+    {"provider": "qwen", "label": "Qwen-1", "token": "PASTE_QWEN_BEARER", "base_cooldown": 10},
+    {"provider": "chatgpt", "label": "GPT-1", "token": "PASTE_GPT_ACCESSTOKEN", "base_cooldown": 8}
+  ],
+  "webai_engine_url": "",
+  "admin_token": ""
+}

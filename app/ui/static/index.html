@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ai-Free — البوابة الموحدة الذكية</title>
+<style>
+:root{--bg:#0b1020;--card:#141c33;--line:#243;--txt:#eaf0ff;--mut:#93a0c0;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--acc:#5aa2ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font-family:Tahoma,Arial,sans-serif}
+header{display:flex;gap:12px;align-items:center;padding:12px 18px;background:#0e1530;border-bottom:1px solid #223;position:sticky;top:0;z-index:5}
+header h1{font-size:18px;margin:0}header small{color:var(--mut)}
+nav{display:flex;gap:8px;margin:12px 18px;flex-wrap:wrap}
+nav button{background:var(--card);color:var(--txt);border:1px solid #2a3a5f;border-radius:10px;padding:8px 14px;cursor:pointer}
+nav button.on{background:var(--acc);border-color:var(--acc);color:#04122b;font-weight:bold}
+main{padding:0 18px 40px;max-width:1100px;margin:auto}
+.card{background:var(--card);border:1px solid #22345c;border-radius:14px;padding:14px;margin:12px 0}
+.mut{color:var(--mut)}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input,select,textarea{background:#0b1330;color:var(--txt);border:1px solid #2a3a5f;border-radius:10px;padding:8px 10px;font-family:inherit}
+button.pri{background:var(--acc);border:none;color:#04122b;font-weight:bold;border-radius:10px;padding:9px 16px;cursor:pointer}
+button.gho{background:transparent;border:1px solid #2a3a5f;color:var(--txt);border-radius:10px;padding:8px 12px;cursor:pointer}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;border-bottom:1px solid #22345c;text-align:right}
+.pill{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:bold}
+.ok{background:#052e16;color:#4ade80}.warn{background:#451a03;color:#fbbf24}.bad{background:#450a0a;color:#f87171}.info{background:#082f49;color:#7dd3fc}
+.bar{height:6px;background:#0b1330;border-radius:6px;overflow:hidden;margin-top:4px}.bar>i{display:block;height:100%;background:var(--warn)}
+#chatlog{display:flex;flex-direction:column;gap:10px;max-height:55vh;overflow:auto}
+.msg{padding:10px 12px;border-radius:12px;max-width:90%;white-space:pre-wrap;line-height:1.8}
+.u{background:#1d2a4d;align-self:flex-end}.a{background:#0f2a1d;align-self:flex-start;border:1px solid #1d4d2e}
+.src{font-size:11px;color:var(--mut);margin-top:6px}
+#waitbox{display:none;background:#2a1a02;border:1px solid #92600a;border-radius:12px;padding:10px;margin:8px 0}
+code{background:#00000055;padding:1px 6px;border-radius:6px}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <div>🤖</div>
+  <div><h1>Ai-Free — البوابة الموحدة الذكية</h1>
+  <small>Chat2API + ds2api + qwen2API + webchat2api + WebAI2API خلف <code>/v1/chat/completions</code></small></div>
+  <div style="margin-inline-start:auto" class="row"><span id="health" class="pill info">...</span>
+  <button class="gho" onclick="loadAll()">↻ تحديث</button></div>
+</header>
+<nav>
+  <button id="t-chat" class="on" onclick="tab('chat')">💬 المحادثة</button>
+  <button id="t-acc" onclick="tab('acc')">👥 الحسابات</button>
+  <button id="t-route" onclick="tab('route')">🧭 التوجيه</button>
+  <button id="t-logs" onclick="tab('logs')">📋 السجلات</button>
+</nav>
+<main>
+<section id="p-chat">
+  <div class="card">
+    <div class="row">
+      <label>النموذج:</label>
+      <select id="model"></select>
+      <label><input type="checkbox" id="allowwait" checked> انتظار ذكي للحسابات</label>
+      <span id="sumline" class="mut"></span>
+    </div>
+    <div id="waitbox">⏳ <span id="waitmsg"></span><div class="bar"><i id="waitbar"></i></div></div>
+    <div id="chatlog"></div>
+    <div class="row" style="margin-top:10px">
+      <input id="qin" style="flex:1" placeholder="اكتب رسالتك... (Enter للإرسال)">
+      <button class="pri" onclick="send()">إرسال ➤</button>
+    </div>
+  </div>
+</section>
+<section id="p-acc" class="hidden">
+  <div class="card"><b id="accsum">...</b><div class="mut">الحالة تتحدث تلقائياً كل ثانيتين مع العد التنازلي للمهلة (Cooldown).</div></div>
+  <div class="card">
+    <h3>➕ إضافة حساب</h3>
+    <div class="row">
+      <select id="nprov"></select>
+      <input id="nlabel" placeholder="اسم الحساب (مثال: DeepSeek-1)">
+      <input id="ntoken" style="flex:1;min-width:220px" placeholder="token / cookie / bearer (يُشفر AES-256)">
+      <input id="ncool" type="number" value="15" style="width:90px" title="المهلة بالثواني">
+      <button class="pri" onclick="addAcc()">إضافة</button>
+    </div>
+    <div class="mut">مصادر الرموز: DeepSeek من <code>chat.deepseek.com</code> (LocalStorage) • Qwen من <code>chat.qwen.ai</code> (Authorization) • ChatGPT من <code>chatgpt.com/api/auth/session</code> • أو اتركه فارغاً لحساب Demo.</div>
+  </div>
+  <div class="card"><table><thead><tr><th>الحساب</th><th>المزود</th><th>الحالة</th><th>المهلة</th><th>نجاح/فشل</th><th>الصحة</th><th>إجراءات</th></tr></thead><tbody id="accrows"></tbody></table></div>
+</section>
+<section id="p-route" class="hidden">
+  <div class="card"><h3>🧭 حالة التوجيه والمزودين</h3><div id="routestat"></div></div>
+  <div class="card"><h3>🔬 محاكاة التوجيه</h3>
+    <div class="row"><select id="simmodel"></select><button class="gho" onclick="simulate()">محاكاة</button><span id="simout" class="mut"></span></div>
+  </div>
+</section>
+<section id="p-logs" class="hidden">
+  <div class="card"><h3>📋 سجلات التدقيق</h3><div class="row"><button class="gho" onclick="loadLogs()">↻ تحديث السجلات</button></div>
+  <table><thead><tr><th>الوقت</th><th>النموذج</th><th>المزود/الحساب</th><th>الانتظار</th><th>المهلة</th><th>النتيجة</th></tr></thead><tbody id="logrows"></tbody></table></div>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let ACCS=[];
+function tab(n){for(const k of['chat','acc','route','logs']){$('p-'+k).classList.toggle('hidden',k!==n);$('t-'+k).classList.toggle('on',k===n)}}
+async function api(p,o){const r=await fetch(p,o);if(!r.ok)throw new Error(await r.text());return r.json()}
+function pill(st){const m={READY:['ok','🟢 جاهز'],IN_USE:['info','🔵 مستخدم'],COOLDOWN:['warn','🟡 مهلة'],RATE_LIMITED:['bad','🔴 حد'],EXPIRED:['bad','🟠 منتهي'],DISABLED:['bad','⛔ معطل'],ERROR:['bad','❌ خطأ']}[st]||['warn',st];return `<span class="pill ${m[0]}">${m[1]}</span>`}
+async function loadAll(){await Promise.all([loadStatus(),loadModels(),loadProv(),loadLogs()])}
+async function loadStatus(){
+ try{const s=await api('/api/accounts/status');
+  $('health').className='pill '+(s.ready>0?'ok':'bad');
+  $('health').textContent=`🟢 ${s.ready} جاهزة | 🟡 ${s.cooldown} مهلة | أقرب: ${s.nearest_ready_in||0}ث`;
+  $('sumline').textContent=`${s.ready} حسابات جاهزة، ${s.cooldown} في مهلة (أقرب بعد ${s.nearest_ready_in||0} ثانية)`;
+  $('accsum').textContent=`🟢 ${s.ready} جاهزة | 🟡 ${s.cooldown} مهلة | 🔴 ${s.rate_limited} حد | 🟠 ${s.expired} منتهية | ⛔ ${s.disabled} معطلة`;
+  ACCS=s.accounts||[];
+  $('accrows').innerHTML=ACCS.map(a=>`<tr><td><b>${a.label}</b><br><span class="mut">${a.id}</span></td><td>${a.provider}</td><td>${pill(a.status)}</td>
+   <td>${a.remaining>0?`متاح بعد <b>${a.remaining}ث</b><div class="bar"><i style="width:${Math.round(100*(1-a.remaining/Math.max(1,a.cooldown_seconds)))}%"></i></div>`:'<span class="mut">—</span>'}</td>
+   <td>✅${a.success_count} / ❌${a.fail_count}<br><span class="mut">${a.avg_latency_ms}ms</span></td>
+   <td>${(a.health_score*100).toFixed(0)}%</td>
+   <td><button class="gho" onclick="toggleAcc('${a.id}',${a.enabled?0:1})">${a.enabled?'⛔':'✅'}</button>
+   <button class="gho" onclick="refreshAcc('${a.id}')">↻</button>
+   <button class="gho" onclick="delAcc('${a.id}')">🗑</button></td></tr>`).join('');
+  const rs=await api('/api/routing/status');
+  $('routestat').innerHTML='<table><tr><th>النموذج</th><th>الحساب المختار</th><th>الانتظار</th></tr>'+
+   rs.routing.map(r=>`<tr><td>${r.model}</td><td>${r.selected?r.selected+' ('+r.provider+')':'— لا يوجد (fallback)'}</td><td>${r.wait??'—'}</td></tr>`).join('')+'</table>';
+ }catch(e){$('health').textContent='⚠ تعذر الاتصال'}
+}
+async function loadModels(){try{const m=await api('/v1/models');const ids=m.data.map(x=>x.id);
+ for(const s of['model','simmodel']){$(s).innerHTML=ids.map(i=>`<option ${i==='auto'?'selected':''}>${i}</option>`).join('')}}catch(e){}}
+async function loadProv(){try{const p=await api('/api/providers');$('nprov').innerHTML=p.map(x=>`<option value="${x.id}">${x.label}</option>`).join('')}catch(e){}}
+async function loadLogs(){try{const l=await api('/api/logs?limit=50');
+ $('logrows').innerHTML=l.map(x=>{const d=new Date(x.created_at*1000).toLocaleTimeString('ar');
+ return `<tr><td>${d}</td><td>${x.model_requested||''}</td><td>${x.provider||''}/${(x.account_id||'').slice(0,12)}</td><td>${x.queue_wait_ms}ms</td><td>${x.cooldown_applied}ث</td><td>${x.success?'<span class="pill ok">ناجح</span>':`<span class="pill bad">فاشل</span> <span class="mut">${(x.error||'').slice(0,60)}</span>`}</td></tr>`}).join('')}catch(e){}}
+async function addAcc(){const b={provider:$('nprov').value,label:$('nlabel').value,token:$('ntoken').value,base_cooldown:+$('ncool').value||15};
+ try{await api('/api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});$('ntoken').value='';$('nlabel').value='';loadStatus()}catch(e){alert(e.message)}}
+async function delAcc(id){if(!confirm('حذف الحساب؟'))return;await api('/api/accounts/'+id,{method:'DELETE'});loadStatus()}
+async function toggleAcc(id,en){await api(`/api/accounts/${id}/${en?'enable':'disable'}`,{method:'POST'});loadStatus()}
+async function refreshAcc(id){await api(`/api/accounts/${id}/refresh`,{method:'POST'});loadStatus()}
+async function simulate(){const m=$('simmodel').value;const r=await api('/api/routing/simulate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})});
+ $('simout').textContent=r.selected?`سيُختار: ${r.selected.label} (${r.selected.provider})`:`لا يوجد حساب جاهز — الانتظار ${r.wait} ثانية`}
+function bubble(role,text,src){const d=document.createElement('div');d.className='msg '+(role==='u'?'u':'a');d.textContent=text;
+ if(src){const s=document.createElement('div');s.className='src';s.textContent=src;d.appendChild(s)}$('chatlog').appendChild(d);$('chatlog').scrollTop=1e9;return d}
+async function send(){const q=$('qin').value.trim();if(!q)return;$('qin').value='';bubble('u',q);
+ const model=$('model').value,allowwait=$('allowwait').checked;
+ const ab=bubble('a','…');$('waitbox').style.display='none';
+ try{const r=await fetch('/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model,messages:[{role:'user',content:q}],stream:true,allow_wait:allowwait})});
+  if(r.status===429){ab.textContent='⚠ كل الحسابات في مهلة. انتظر قليلاً أو أضف حسابات جديدة.';loadStatus();return}
+  const rd=r.body.getReader(),dec=new TextDecoder();let buf='',txt='',src='';
+  while(true){const{done,value}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});
+   const parts=buf.split('\n\n');buf=parts.pop();
+   for(const p of parts){const line=p.trim();if(!line.startsWith('data:'))continue;const data=line.slice(5).trim();
+    if(data==='[DONE]')continue;try{const o=JSON.parse(data);
+     if(o.type==='waiting'){$('waitbox').style.display='block';$('waitmsg').textContent=o.message;$('waitbar').style.width='100%'}
+     else if(o.type==='done'){src=`📡 ${o.provider} / ${o.account} • ${o.cooldown}`}
+     else if(o.error){txt+='\n⚠ '+o.error}
+     else{const d=o.choices?.[0]?.delta?.content||'';txt+=d}
+     ab.childNodes[0].textContent=txt||'…';
+    }catch(e){}}}
+  if(src){const s=document.createElement('div');s.className='src';s.textContent=src;ab.appendChild(s)}
+  if(!txt)ab.childNodes[0].textContent='(رد فارغ)';
+ }catch(e){ab.textContent='❌ خطأ: '+e.message}
+ loadStatus();loadLogs()}
+$('qin').addEventListener('keydown',e=>{if(e.key==='Enter')send()});
+loadAll();setInterval(loadStatus,2000);
+</script>
+</body>
+</html>
