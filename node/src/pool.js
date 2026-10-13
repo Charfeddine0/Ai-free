@@ -174,7 +174,7 @@ export class Pool {
 }
 
 // ---------- استيراد جماعي CSV ----------
-// provider,label,token[,cooldown,priority,tags(a|b)]
+// provider,label,token[,cooldown,priority,tags(a|b),mode(auto|api|browser)]
 export function parseAccountsCsv(text) {
   const rows = [];
   const errors = [];
@@ -192,7 +192,7 @@ export function parseAccountsCsv(text) {
   text.split('\n').forEach((raw, i) => {
     const line = raw.trim();
     if (!line || line.startsWith('#')) return;
-    const [provider, label, token, cooldown, priority, tags] = splitLine(line);
+    const [provider, label, token, cooldown, priority, tags, mode] = splitLine(line);
     if (!provider || !token) { errors.push(i + 1); return; }
     rows.push({
       provider: provider.trim(), label: (label || '').trim(),
@@ -200,6 +200,7 @@ export function parseAccountsCsv(text) {
       base_cooldown: Number(cooldown) || undefined,
       priority: priority !== undefined && priority !== '' ? Number(priority) : undefined,
       tags: tags ? tags.split('|').map((t) => t.trim()).filter(Boolean) : undefined,
+      mode: ['auto', 'api', 'browser'].includes((mode || '').trim()) ? mode.trim() : undefined,
     });
   });
   return { rows, errors };

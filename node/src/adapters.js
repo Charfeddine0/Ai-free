@@ -7,6 +7,15 @@
 // demo: رد محلي فوري
 import { decrypt } from './crypto.js';
 import { settings } from './config.js';
+import { shouldUseBrowser, runBrowserFlow } from './noapi/runner.js';
+import { browserConfigured } from './noapi/cdp.js';
+import { resolveSite } from './noapi/sites.js';
+
+export const browserSetupHint = (siteId) =>
+  `🌐 وضع المتصفح (${siteId}) غير مفعّل بعد.\n` +
+  `شغّل كروم بهذا الأمر ثم أعد المحاولة — سأتصفح الموقع كبشري حقيقي:\n` +
+  `chrome --remote-debugging-port=9222\n` +
+  `واضبط المتغير: CHROME_DEBUG_URL=http://127.0.0.1:9222`;
 
 export class UpstreamError extends Error {
   constructor(message, statusCode = 500, retryAfter = null) {
@@ -57,6 +66,13 @@ class DeepSeekAdapter extends BaseAdapter {
   constructor() { super('deepseek', 'DeepSeek (ds2api + Chat2API)'); }
   async *chat(account, messages, model) {
     const token = tokenOf(account);
+    const hasApi = !!(token && !token.startsWith('demo'));
+    if (shouldUseBrowser(account, hasApi)) {
+      if (browserConfigured()) { yield* runBrowserFlow({ siteId: 'deepseek', account, messages }); return; }
+      yield browserSetupHint('deepseek');
+      return;
+    }
+    if (!hasApi) { yield '[DeepSeek] أضف userToken أو فعّل وضع المتصفح (mode=browser).'; return; }
     const res = await fetchUp('https://chat.deepseek.com/api/v0/chat/completion', {
       method: 'POST',
       headers: {
@@ -81,8 +97,14 @@ class ChatGPTAdapter extends BaseAdapter {
   constructor() { super('chatgpt', 'ChatGPT Web'); }
   async *chat(account, messages, model) {
     const token = tokenOf(account);
-    if (!token || token.startsWith('demo')) {
-      yield '[وضع المتصفح] لا يوجد accessToken. أضفه من https://chatgpt.com/api/auth/session أو استخدم Demo.';
+    const hasApi = !!(token && !token.startsWith('demo'));
+    if (shouldUseBrowser(account, hasApi)) {
+      if (browserConfigured()) { yield* runBrowserFlow({ siteId: 'chatgpt', account, messages }); return; }
+      yield browserSetupHint('chatgpt');
+      return;
+    }
+    if (!hasApi) {
+      yield '[ChatGPT] لا يوجد accessToken. أضفه من https://chatgpt.com/api/auth/session أو فعّل وضع المتصفح (mode=browser).';
       return;
     }
     const res = await fetchUp('https://chatgpt.com/backend-api/conversation', {
@@ -102,8 +124,14 @@ class QwenAdapter extends BaseAdapter {
   constructor() { super('qwen', 'Qwen Chat'); }
   async *chat(account, messages, model) {
     const token = tokenOf(account);
-    if (!token || token.startsWith('demo')) {
-      yield '[Qwen] لا يوجد bearer token. استخرجه من chat.qwen.ai > DevTools > Authorization أو استخدم Demo.';
+    const hasApi = !!(token && !token.startsWith('demo'));
+    if (shouldUseBrowser(account, hasApi)) {
+      if (browserConfigured()) { yield* runBrowserFlow({ siteId: 'qwen', account, messages }); return; }
+      yield browserSetupHint('qwen');
+      return;
+    }
+    if (!hasApi) {
+      yield '[Qwen] لا يوجد bearer token. استخرجه من chat.qwen.ai > DevTools > Authorization أو فعّل وضع المتصفح (mode=browser).';
       return;
     }
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Origin: 'https://chat.qwen.ai', Referer: 'https://chat.qwen.ai/' };
@@ -127,9 +155,14 @@ class QwenAdapter extends BaseAdapter {
 class WebChatAdapter extends BaseAdapter {
   constructor() { super('webchat', 'WebChat Pool (GPT/Grok/Gemini)'); }
   async *chat(account, messages, model) {
-    const sub = `${account.label} ${model}`.toLowerCase();
-    const kind = sub.includes('grok') ? 'grok' : sub.includes('gemini') ? 'gemini' : 'gpt';
-    yield `[webchat:${kind}] الحساب '${account.label}' يحتاج جلسة متصفح حقيقية (cookies) كما في webchat2api الأصلية. أضف بيانات الاعتماد أو استخدم Demo.`;
+    const siteId = resolveSite('webchat', account.label, model);
+    // webchat يعمل أساساً بالجلسات/المتصفح (مثل الأصل) — token هنا يعني cookies
+    if (shouldUseBrowser(account, false)) {
+      if (browserConfigured()) { yield* runBrowserFlow({ siteId, account, messages }); return; }
+      yield browserSetupHint(siteId) + `\nاستورد cookies الجلسة من تبويب 🌐 Web لتقوية الدخول.`;
+      return;
+    }
+    yield `[webchat:${siteId}] عيّن mode=browser وشغّل كروم، أو استخدم Demo للتجربة.`;
   }
 }
 
@@ -149,7 +182,13 @@ class WebAIAdapter extends BaseAdapter {
       return;
     }
     const q = messages.at(-1)?.content || '';
-    yield `[WebAI2API-mode] طلبك: ${String(q).slice(0, 200)}\nمحاكاة task-queue + load-balancing من الأصل. شغّل حاوية foxhui/webai-2api واضبط WEBAI_ENGINE_URL للتفعيل الكامل.`;
+    const siteId = resolveSite('webai', account.label, '');
+    if (shouldUseBrowser(account, false)) {
+      if (browserConfigured()) { yield* runBrowserFlow({ siteId, account, messages }); return; }
+      yield browserSetupHint(siteId);
+      return;
+    }
+    yield `[WebAI2API-mode] طلبك: ${String(q).slice(0, 200)}\nمحاكاة task-queue + load-balancing من الأصل. شغّل حاوية foxhui/webai-2api واضبط WEBAI_ENGINE_URL، أو فعّل وضع المتصفح للتفعيل الكامل.`;
   }
 }
 

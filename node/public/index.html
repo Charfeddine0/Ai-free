@@ -45,6 +45,7 @@ code{background:#00000055;padding:1px 6px;border-radius:6px}
   <button id="t-chat" class="on" onclick="tab('chat')">💬 المحادثة</button>
   <button id="t-acc" onclick="tab('acc')">👥 الحسابات</button>
   <button id="t-pool" onclick="tab('pool')">🏊 الضغط والطابور</button>
+  <button id="t-web" onclick="tab('web')">🌐 بدون API</button>
   <button id="t-brain" onclick="tab('brain')">🧠 العقل الذكي</button>
   <button id="t-logs" onclick="tab('logs')">📋 السجلات</button>
 </nav>
@@ -96,6 +97,21 @@ code{background:#00000055;padding:1px 6px;border-radius:6px}
     <input id="bval" type="number" value="15" style="width:90px">
     <button class="gho" onclick="bulkGo()">تنفيذ</button><span id="bout" class="mut"></span></div></div>
 </section>
+<section id="p-web" class="hidden">
+  <div class="card"><h3>🌐 التشغيل بدون API — متصفح حقيقي بسلوك بشري</h3>
+    <div id="browserstat" class="mut">...</div>
+    <div class="mut" style="margin-top:6px">للتفعيل على حاسوبك:<br><code>chrome --remote-debugging-port=9222</code><br>
+    ثم شغّل البوابة مع: <code>CHROME_DEBUG_URL=http://127.0.0.1:9222</code><br>
+    بعدها أي حساب بوضع <code>browser</code> (أو <code>auto</code> بلا رمز) سيُدار بالمتصفح: كتابة بشرية + فأرة Bezier + بصمة متغيرة + جلسات cookies.</div></div>
+  <div class="card"><h3>🍪 استيراد جلسة (cookies)</h3>
+    <div class="row"><select id="sessacc"></select>
+    <button class="pri" onclick="importSession()">استيراد الجلسة</button><span id="sessout" class="mut"></span></div>
+    <textarea id="cookiesbox" rows="3" style="width:100%;background:#0b1330;color:var(--txt);border:1px solid #2a3a5f;border-radius:10px;margin-top:8px" placeholder='[{"name":"session","value":"..."}]  أو  name=value; name2=value2  أو صيغة Netscape'></textarea>
+    <div class="mut">الصيغ المقبولة: JSON (CDP) / <code>name=value;</code> / Netscape. تُشفر AES-256 وتُحقن في المتصفح تلقائياً.</div></div>
+  <div class="card"><h3>🔀 وضع التشغيل لكل حساب</h3>
+    <div class="mut"><code>auto</code>=ذكي (API إن وُجد وإلا متصفح) • <code>api</code>=رموز فقط • <code>browser</code>=متصفح دائماً</div>
+    <table><thead><tr><th>الحساب</th><th>المزود</th><th>الوضع</th><th>الجلسة</th></tr></thead><tbody id="moderows"></tbody></table></div>
+</section>
 <section id="p-brain" class="hidden">
   <div class="card"><h3>🧠 العقل الذكي — التعلّم التكيفي لكل مزود</h3>
     <div class="mut">المهلة المضبوطة تُحسب تلقائياً: <code>15 + r429×40 + بطء</code> — تزيد عند الاختناق وتنخفض عند الاستقرار.</div>
@@ -110,10 +126,10 @@ code{background:#00000055;padding:1px 6px;border-radius:6px}
 </main>
 <script>
 const $=id=>document.getElementById(id);
-function tab(n){for(const k of['chat','acc','pool','brain','logs']){$('p-'+k).classList.toggle('hidden',k!==n);$('t-'+k).classList.toggle('on',k===n)}}
+function tab(n){for(const k of['chat','acc','pool','web','brain','logs']){$('p-'+k).classList.toggle('hidden',k!==n);$('t-'+k).classList.toggle('on',k===n)}}
 async function api(p,o){const r=await fetch(p,o);if(!r.ok)throw new Error(await r.text());return r.json()}
 function pill(st){const m={READY:['ok','🟢 جاهز'],IN_USE:['info','🔵 مستخدم'],COOLDOWN:['warn','🟡 مهلة'],RATE_LIMITED:['bad','🔴 حد'],EXPIRED:['bad','🟠 منتهي'],DISABLED:['bad','⛔ معطل'],ERROR:['bad','❌ خطأ']}[st]||['warn',st];return `<span class="pill ${m[0]}">${m[1]}</span>`}
-async function loadAll(){await Promise.all([loadStatus(),loadModels(),loadProv(),loadLogs(),loadBrain(),loadPool()])}
+async function loadAll(){await Promise.all([loadStatus(),loadModels(),loadProv(),loadLogs(),loadBrain(),loadPool(),loadWeb()])}
 async function loadStatus(){
  try{const s=await api('/api/accounts/status');
   $('health').className='pill '+(s.ready>0?'ok':'bad');
@@ -163,6 +179,22 @@ async function importCsv(){try{const r=await api('/api/accounts/import',{method:
 async function bulkGo(){const f={};if($('bprov').value)f.provider=$('bprov').value;if($('btag').value.trim())f.tag=$('btag').value.trim();
  try{const r=await api('/api/accounts/bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filter:f,action:$('bact').value,value:+$('bval').value})});
  $('bout').textContent=`✅ طُبق على ${r.affected} حساب`;loadStatus();loadPool()}catch(e){$('bout').textContent='❌ '+e.message}}
+async function loadWeb(){try{const b=await api('/api/browser/status');
+ $('browserstat').innerHTML=b.reachable
+  ?`<span class="pill ok">🟢 كروم متصل: ${b.browser||''}</span> <span class="mut">${b.pages||0} صفحة • ${b.max_pages} صفحات قصوى • ${b.sessions.length} جلسات</span>`
+  :`<span class="pill warn">🟡 وضع API فقط</span> <span class="mut">${b.configured?'':'(اضبط CHROME_DEBUG_URL) '}${b.error||''}</span>`+(b.setup?`<br><span class="mut">${b.setup}</span>`:'');
+ const s=await api('/api/accounts/status');
+ $('sessacc').innerHTML=(s.accounts||[]).map(a=>`<option value="${a.id}">${a.label} (${a.provider})</option>`).join('');
+ const sessById=Object.fromEntries((b.sessions||[]).map(x=>[x.accountId,x]));
+ $('moderows').innerHTML=(s.accounts||[]).map(a=>{const ss=sessById[a.id];
+  return `<tr><td><b>${a.label}</b></td><td>${a.provider}</td>
+  <td><select onchange="setMode('${a.id}',this.value)">
+   ${['auto','api','browser'].map(m=>`<option value="${m}" ${a.mode===m?'selected':''}>${m}</option>`).join('')}</select></td>
+  <td>${ss?`<span class="pill ${ss.healthy?'ok':'bad'}">🍪 ${ss.cookies} • فشل ${ss.fails}</span>`:'<span class="mut">—</span>'}</td></tr>`}).join('');
+ }catch(e){$('browserstat').textContent='⚠ '+e.message}}
+async function setMode(id,mode){await api('/api/accounts/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});loadStatus()}
+async function importSession(){try{const r=await api('/api/sessions/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({account_id:$('sessacc').value,cookies:$('cookiesbox').value})});
+ $('sessout').textContent=`✅ استُورد ${r.imported} cookie`;$('cookiesbox').value='';loadWeb()}catch(e){$('sessout').textContent='❌ '+e.message}}
 async function toggleAcc(id,en){await api(`/api/accounts/${id}/${en?'enable':'disable'}`,{method:'POST'});loadStatus()}
 async function refreshAcc(id){await api(`/api/accounts/${id}/refresh`,{method:'POST'});loadStatus()}
 function bubble(role,text,src){const d=document.createElement('div');d.className='msg '+(role==='u'?'u':'a');const t=document.createElement('span');t.textContent=text;d.appendChild(t);
@@ -187,7 +219,7 @@ async function send(){const q=$('qin').value.trim();if(!q)return;$('qin').value=
  }catch(e){ab.firstChild.textContent='❌ '+e.message}
  loadStatus();loadLogs();loadBrain()}
 $('qin').addEventListener('keydown',e=>{if(e.key==='Enter')send()});
-loadAll();setInterval(()=>{loadStatus();loadBrain();loadPool()},3000);
+loadAll();setInterval(()=>{loadStatus();loadBrain();loadPool();loadWeb()},4000);
 </script>
 </body>
 </html>

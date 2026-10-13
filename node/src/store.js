@@ -25,7 +25,7 @@ export function openStore(dataDir) {
       max_concurrency INTEGER DEFAULT 1, daily_quota INTEGER DEFAULT 0,
       used_today INTEGER DEFAULT 0, quota_day TEXT DEFAULT '',
       min_spacing INTEGER DEFAULT 0, last_started_at REAL DEFAULT 0,
-      weight REAL DEFAULT 1.0, tags TEXT DEFAULT '[]');
+      weight REAL DEFAULT 1.0, tags TEXT DEFAULT '[]', mode TEXT DEFAULT 'auto');
     CREATE TABLE IF NOT EXISTS audit_logs(
       id TEXT PRIMARY KEY, request_id TEXT, model_requested TEXT, model_resolved TEXT,
       provider TEXT, account_id TEXT, queue_wait_ms INTEGER DEFAULT 0,
@@ -44,6 +44,7 @@ export function openStore(dataDir) {
     ['used_today', 'INTEGER DEFAULT 0'], ['quota_day', "TEXT DEFAULT ''"],
     ['min_spacing', 'INTEGER DEFAULT 0'], ['last_started_at', 'REAL DEFAULT 0'],
     ['weight', 'REAL DEFAULT 1.0'], ['tags', "TEXT DEFAULT '[]'"],
+    ['mode', "TEXT DEFAULT 'auto'"],
   ]) {
     if (!have.has(col)) db.exec(`ALTER TABLE accounts ADD COLUMN ${col} ${def}`);
   }
@@ -58,6 +59,7 @@ const row = (r) => {
   try { d.models = JSON.parse(d.models || '[]'); } catch { d.models = []; }
   try { d.tags = JSON.parse(d.tags || '[]'); } catch { d.tags = []; }
   d.enabled = !!d.enabled;
+  d.mode = d.mode || 'auto'; // auto | api | browser
   return d;
 };
 
@@ -78,7 +80,7 @@ class Store {
     if (Array.isArray(acc.tags)) acc.tags = JSON.stringify(acc.tags);
     acc.updated_at = now;
     if (!acc.created_at) acc.created_at = now;
-    const cols = ['id','provider','label','credentials_enc','status','cooldown_until','cooldown_seconds','base_cooldown','consecutive_fails','last_used_at','success_count','fail_count','avg_latency_ms','health_score','quota_remaining','priority','models','enabled','created_at','updated_at','max_concurrency','daily_quota','used_today','quota_day','min_spacing','last_started_at','weight','tags'];
+    const cols = ['id','provider','label','credentials_enc','status','cooldown_until','cooldown_seconds','base_cooldown','consecutive_fails','last_used_at','success_count','fail_count','avg_latency_ms','health_score','quota_remaining','priority','models','enabled','created_at','updated_at','max_concurrency','daily_quota','used_today','quota_day','min_spacing','last_started_at','weight','tags','mode'];
     const vals = cols.map((k) => acc[k] ?? null);
     this.db.prepare(`INSERT INTO accounts (${cols}) VALUES (${cols.map(() => '?')})
       ON CONFLICT(id) DO UPDATE SET ${cols.filter((c) => c !== 'id').map((c) => `${c}=excluded.${c}`)}`).run(...vals);

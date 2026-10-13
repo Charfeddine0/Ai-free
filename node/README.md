@@ -23,7 +23,24 @@ node src/server.js        # أو من الجذر: bash scripts/run-node.sh
 # http://127.0.0.1:8080
 ```
 
-## الاختبارات (30/30 ✅)
+## 🌐 الذكاء الكامل بدون API (الجديد)
+
+عند غياب الرموز، البوابة تتصفح المواقع **بمتصفح كروم حقيقي وسلوك بشري** (فكرة WebAI2API/Camoufox، لكن ببروتوكول CDP الخام — بدون مكتبات):
+
+| المكوّن | الملف | الذكاء |
+|---|---|---|
+| 🧍 سلوك بشري | `src/noapi/human.js` | كتابة بدفعات غير منتظمة + وقفات تفكير + فأرة Bezier برعشة يد + Fitts's law + بصمة متغيرة (viewport/UA/locale) |
+| 🌐 عميل CDP | `src/noapi/cdp.js` | تحكم كامل بكروم (`--remote-debugging-port=9222`): تبويبات، تنقل، كتابة، نقر، لقطات، cookies — بـ WebSocket المدمج فقط |
+| 🍪 الجلسات | `src/noapi/sessions.js` | استيراد cookies (JSON/Netscape/`name=value`) + حقن تلقائي + صحة (3 فشل = عزل) + تدوير |
+| 🗺️ المواقع | `src/noapi/sites.js` | إعدادات chatgpt/deepseek/gemini/grok/qwen/lmarena + **اكتشاف تلقائي** لأي مربع إدخال + تجاوز عبر `sites.override` |
+| 🏃 العدّاء | `src/noapi/runner.js` | قراءة تدريجية حية حتى الاستقرار + semaphore للصفحات + الفشل يتيح Fallback تلقائياً |
+| 🔀 الأوضاع | عمود `mode` | `auto`=API إن وُجد وإلا متصفح • `api`=رموز فقط • `browser`=متصفح دائماً — لكل حساب |
+
+**التفعيل:** `chrome --remote-debugging-port=9222` ثم `CHROME_DEBUG_URL=http://127.0.0.1:9222`.
+
+**نقاط جديدة:** `GET /api/browser/status` (كروم؟ جلسات؟) • `POST /api/sessions/import` (cookies مشفرة) • تبويب **🌐 بدون API** (حالة + استيراد + أوضاع).
+
+## الاختبارات (52/52 ✅)
 
 ```bash
 cd node && npm test   # node --test فقط، بدون تنزيل شيء

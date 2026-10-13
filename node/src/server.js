@@ -7,13 +7,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
 import { APP_NAME, APP_VERSION, PROVIDER_DEFAULTS, VIRTUAL_MODELS, settings } from './config.js';
-import { encrypt } from './crypto.js';
+import { encrypt, decrypt } from './crypto.js';
 import { openStore } from './store.js';
 import { isReady, markUsed, refreshStatus, remainingSeconds } from './cooldown.js';
 import { getNextAccount, scoreAccount, statusSummary, supports } from './router.js';
 import { breakerFail, breakerStatus, breakerSuccess, breakerAllow, cacheKey, dedupRun, needsPrewarm, observeProvider, tunedBase } from './brain.js';
 import { Pool, parseAccountsCsv } from './pool.js';
 import { getAdapter, listAdapters, RateLimited, UpstreamError } from './adapters.js';
+import { chromeStatus, browserConfigured, debugBase } from './noapi/cdp.js';
+import { webSessions } from './noapi/runner.js';
+import { parseCookies } from './noapi/sessions.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let store = openStore(settings.dataDir);
@@ -198,6 +201,29 @@ async function handler(req, res) {
     return json(res, 200, Object.entries(PROVIDER_DEFAULTS).map(([id, v]) => ({ id, label: v.label, models: v.models, base_cooldown: v.baseCooldown, max_concurrency: v.maxConcurrency, max_rpm: v.maxRpm || 30, auth_type: v.authType })));
   }
   if (req.method === 'GET' && path === '/api/adapters') return json(res, 200, listAdapters());
+  if (req.method === 'GET' && path === '/api/browser/status') {
+    const st = await chromeStatus();
+    return json(res, 200, {
+      ...st, max_pages: Math.max(1, Number(process.env.BROWSER_MAX_PAGES || 2)),
+      sessions: webSessions.stats(),
+      setup: browserConfigured() ? null : 'chrome --remote-debugging-port=9222  ثم  CHROME_DEBUG_URL=http://127.0.0.1:9222',
+    });
+  }
+  if (req.method === 'POST' && path === '/api/sessions/import') {
+    // استيراد cookies لجلسة حساب (JSON array / object / Netscape / name=value)
+    const b = JSON.parse(await readBody(req, 2 * 1024 * 1024));
+    const a = store.getAccount(b.account_id);
+    if (!a) return json(res, 404, { error: 'account not found' });
+    const list = parseCookies(b.cookies);
+    if (!list.length) return json(res, 400, { error: 'no cookies parsed' });
+    let creds = {};
+    try { creds = JSON.parse(decrypt(settings.masterKey, a.credentials_enc || '')) || {}; } catch { creds = {}; }
+    creds.cookies = list;
+    if (b.token) creds.token = b.token;
+    store.updateFields(a.id, { credentials_enc: encrypt(settings.masterKey, JSON.stringify(creds)) });
+    const n = webSessions.load(a.id, list);
+    return json(res, 200, { ok: true, id: a.id, imported: n });
+  }
   if (req.method === 'GET' && path === '/api/pool/status') {
     const accs = store.listAccounts();
     const p = pool.pressure(accs.map((a) => refreshStatus(a)), remainingSeconds, avgLatencyOf(accs));
@@ -265,6 +291,7 @@ async function handler(req, res) {
         avg_latency_ms: 0, health_score: 1, quota_remaining: 1000,
         priority: r.priority ?? 5, models: d.models, enabled: true,
         max_concurrency: d.maxConcurrency || 1, weight: 1, tags: r.tags || [],
+        mode: r.mode || 'auto',
       });
       added += 1;
     });
@@ -302,16 +329,18 @@ async function handler(req, res) {
       max_concurrency: b.max_concurrency || d.maxConcurrency || 1,
       daily_quota: b.daily_quota || 0, min_spacing: b.min_spacing || 0,
       weight: b.weight ?? 1, tags: b.tags || [],
+      mode: ['auto', 'api', 'browser'].includes(b.mode) ? b.mode : 'auto',
     });
     return json(res, 200, publicAcc(acc));
   }
   const mPatch = path.match(/^\/api\/accounts\/([^/]+)$/);
   if (mPatch && req.method === 'PATCH') {
-    // ضبط الضغط لكل حساب: priority/weight/models/tags/daily_quota/min_spacing/max_concurrency/label/base_cooldown
+    // ضبط الضغط لكل حساب: priority/weight/models/tags/daily_quota/min_spacing/max_concurrency/label/base_cooldown/mode
     const b = JSON.parse(await readBody(req));
-    const allowed = ['label', 'priority', 'weight', 'models', 'tags', 'daily_quota', 'min_spacing', 'max_concurrency', 'base_cooldown'];
+    const allowed = ['label', 'priority', 'weight', 'models', 'tags', 'daily_quota', 'min_spacing', 'max_concurrency', 'base_cooldown', 'mode'];
     const fields = Object.fromEntries(Object.entries(b).filter(([k]) => allowed.includes(k)));
     if (!Object.keys(fields).length) return json(res, 400, { error: `allowed: ${allowed}` });
+    if (fields.mode && !['auto', 'api', 'browser'].includes(fields.mode)) return json(res, 400, { error: 'mode must be auto|api|browser' });
     const a = store.updateFields(mPatch[1], fields);
     if (!a) return json(res, 404, { error: 'not found' });
     return json(res, 200, publicAcc(a));
