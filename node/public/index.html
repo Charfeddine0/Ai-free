@@ -44,6 +44,7 @@ code{background:#00000055;padding:1px 6px;border-radius:6px}
 <nav>
   <button id="t-chat" class="on" onclick="tab('chat')">💬 المحادثة</button>
   <button id="t-acc" onclick="tab('acc')">👥 الحسابات</button>
+  <button id="t-pool" onclick="tab('pool')">🏊 الضغط والطابور</button>
   <button id="t-brain" onclick="tab('brain')">🧠 العقل الذكي</button>
   <button id="t-logs" onclick="tab('logs')">📋 السجلات</button>
 </nav>
@@ -75,6 +76,26 @@ code{background:#00000055;padding:1px 6px;border-radius:6px}
   </div>
   <div class="card"><table><thead><tr><th>الحساب</th><th>المزود</th><th>الحالة</th><th>المهلة</th><th>نجاح/فشل</th><th>الصحة</th><th>إجراءات</th></tr></thead><tbody id="accrows"></tbody></table></div>
 </section>
+<section id="p-pool" class="hidden">
+  <div class="card"><h3>🏊 ضغط الحسابات — لا ضغط على أي حساب</h3>
+    <div id="recbox" class="mut"></div>
+    <div class="grid" id="poolprov" style="margin-top:8px"></div></div>
+  <div class="card"><h3>⏳ الطابور العادل <span id="qdepth" class="pill info">0</span> <span class="mut">ETA: <span id="qeta">0</span>ث</span></h3>
+    <div id="qtable"></div></div>
+  <div class="card"><h3>📥 استيراد جماعي (سطر لكل حساب)</h3>
+    <div class="mut"><code>provider,label,token,cooldown,priority,tags</code> — مثال: <code>deepseek,DS-5,tokenXYZ,15,8,paid|team-a</code></div>
+    <textarea id="csvbox" rows="4" style="width:100%;background:#0b1330;color:var(--txt);border:1px solid #2a3a5f;border-radius:10px;margin:8px 0" placeholder="deepseek,DS-1,TOKEN1&#10;qwen,Q-1,TOKEN2"></textarea>
+    <div class="row"><button class="pri" onclick="importCsv()">📥 استيراد</button>
+    <span id="impout" class="mut"></span>
+    <span style="flex:1"></span>
+    <button class="gho" onclick="window.open('/api/accounts/export','_blank')">📤 تصدير (بدون رموز)</button></div></div>
+  <div class="card"><h3>⚙️ عمليات جماعية</h3>
+    <div class="row"><select id="bprov"><option value="">كل المزودين</option></select>
+    <input id="btag" placeholder="وسم (tag)">
+    <select id="bact"><option value="disable">⛔ تعطيل</option><option value="enable">✅ تفعيل</option><option value="set_cooldown">⏱ مهلة</option><option value="set_quota">📊 حصة يومية</option><option value="set_spacing">↔ تباعد</option><option value="set_weight">⚖ وزن</option></select>
+    <input id="bval" type="number" value="15" style="width:90px">
+    <button class="gho" onclick="bulkGo()">تنفيذ</button><span id="bout" class="mut"></span></div></div>
+</section>
 <section id="p-brain" class="hidden">
   <div class="card"><h3>🧠 العقل الذكي — التعلّم التكيفي لكل مزود</h3>
     <div class="mut">المهلة المضبوطة تُحسب تلقائياً: <code>15 + r429×40 + بطء</code> — تزيد عند الاختناق وتنخفض عند الاستقرار.</div>
@@ -89,17 +110,17 @@ code{background:#00000055;padding:1px 6px;border-radius:6px}
 </main>
 <script>
 const $=id=>document.getElementById(id);
-function tab(n){for(const k of['chat','acc','brain','logs']){$('p-'+k).classList.toggle('hidden',k!==n);$('t-'+k).classList.toggle('on',k===n)}}
+function tab(n){for(const k of['chat','acc','pool','brain','logs']){$('p-'+k).classList.toggle('hidden',k!==n);$('t-'+k).classList.toggle('on',k===n)}}
 async function api(p,o){const r=await fetch(p,o);if(!r.ok)throw new Error(await r.text());return r.json()}
 function pill(st){const m={READY:['ok','🟢 جاهز'],IN_USE:['info','🔵 مستخدم'],COOLDOWN:['warn','🟡 مهلة'],RATE_LIMITED:['bad','🔴 حد'],EXPIRED:['bad','🟠 منتهي'],DISABLED:['bad','⛔ معطل'],ERROR:['bad','❌ خطأ']}[st]||['warn',st];return `<span class="pill ${m[0]}">${m[1]}</span>`}
-async function loadAll(){await Promise.all([loadStatus(),loadModels(),loadProv(),loadLogs(),loadBrain()])}
+async function loadAll(){await Promise.all([loadStatus(),loadModels(),loadProv(),loadLogs(),loadBrain(),loadPool()])}
 async function loadStatus(){
  try{const s=await api('/api/accounts/status');
   $('health').className='pill '+(s.ready>0?'ok':'bad');
   $('health').textContent=`🟢 ${s.ready} | 🟡 ${s.cooldown} | أقرب: ${s.nearest_ready_in||0}ث`;
   $('sumline').textContent=`${s.ready} جاهزة، ${s.cooldown} في مهلة (أقرب بعد ${s.nearest_ready_in||0} ثانية)`;
   $('accsum').textContent=`🟢 ${s.ready} جاهزة | 🟡 ${s.cooldown} مهلة | 🔴 ${s.rate_limited} حد | 🟠 ${s.expired} منتهية | ⛔ ${s.disabled} معطلة`;
-  $('accrows').innerHTML=(s.accounts||[]).map(a=>`<tr><td><b>${a.label}</b><br><span class="mut">${a.id}</span></td><td>${a.provider}</td><td>${pill(a.status)}${a.prewarm?' <span class="pill vio">🔥 تسخين</span>':''}</td>
+  $('accrows').innerHTML=(s.accounts||[]).map(a=>`<tr><td><b>${a.label}</b><br><span class="mut">${a.id} • ⚖${a.weight??1} • ⏸${a.inflight||0}/${a.max_concurrency||1}</span>${(a.tags||[]).length?`<br><span class="pill vio">${a.tags.join(' • ')}</span>`:''}${a.daily_quota?`<br><span class="mut">📊 ${a.used_today||0}/${a.daily_quota} اليوم</span>`:''}</td><td>${a.provider}</td><td>${pill(a.status)}${a.prewarm?' <span class="pill vio">🔥 تسخين</span>':''}</td>
    <td>${a.remaining>0?`بعد <b>${a.remaining}ث</b><div class="bar"><i style="width:${Math.round(100*(1-a.remaining/Math.max(1,a.cooldown_seconds)))}%"></i></div>`:'<span class="mut">—</span>'}</td>
    <td>✅${a.success_count} / ❌${a.fail_count}<br><span class="mut">${a.avg_latency_ms}ms</span></td>
    <td>${(a.health_score*100).toFixed(0)}%</td>
@@ -109,7 +130,8 @@ async function loadStatus(){
  }catch(e){$('health').textContent='⚠ تعذر الاتصال'}
 }
 async function loadModels(){try{const m=await api('/v1/models');$('model').innerHTML=m.data.map(x=>`<option ${x.id==='auto'?'selected':''}>${x.id}</option>`).join('')}catch(e){}}
-async function loadProv(){try{const p=await api('/api/providers');$('nprov').innerHTML=p.map(x=>`<option value="${x.id}">${x.label}</option>`).join('')}catch(e){}}
+async function loadProv(){try{const p=await api('/api/providers');$('nprov').innerHTML=p.map(x=>`<option value="${x.id}">${x.label} (≤${x.max_rpm}/د)</option>`).join('');
+ $('bprov').innerHTML='<option value="">كل المزودين</option>'+p.map(x=>`<option value="${x.id}">${x.id}</option>`).join('')}catch(e){}}
 async function loadLogs(){try{const l=await api('/api/logs?limit=50');
  $('logrows').innerHTML=l.map(x=>{const d=new Date(x.created_at*1000).toLocaleTimeString('ar');
  const src=x.provider==='cache'?'⚡ ذاكرة':`${x.provider||''}/${(x.account_id||'').slice(0,12)}`;
@@ -128,6 +150,19 @@ async function loadBrain(){try{const b=await api('/api/brain');
 async function addAcc(){const b={provider:$('nprov').value,label:$('nlabel').value,token:$('ntoken').value,base_cooldown:+$('ncool').value||15};
  try{await api('/api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});$('ntoken').value='';$('nlabel').value='';loadStatus()}catch(e){alert(e.message)}}
 async function delAcc(id){if(!confirm('حذف؟'))return;await api('/api/accounts/'+id,{method:'DELETE'});loadStatus()}
+async function loadPool(){try{const p=await api('/api/pool/status');
+ $('recbox').innerHTML=p.recommendations.length?p.recommendations.map(r=>`💡 ${r}`).join('<br>'):'✅ التوزيع متوازن — لا حساب تحت ضغط مرتفع.';
+ $('poolprov').innerHTML=Object.entries(p.byProvider).map(([k,g])=>{const cls=g.avgPressure>=70?'bad':g.avgPressure>=40?'warn':'ok';
+  return `<div class="stat"><b>${k}</b><span class="pill ${cls}">${g.avgPressure}% ضغط</span><br><span class="mut">${g.ready}/${g.total} جاهزة • ${g.inflight} مشغولة • ${g.rpm}/د (سقف ${p.caps[k]??'?'})</span></div>`}).join('');
+ $('qdepth').textContent=p.queueDepth;$('qeta').textContent=p.etaSec;
+ $('qtable').innerHTML=p.queue.length?'<table><tr><th>المركز</th><th>النماذج</th><th>الانتظار</th></tr>'+
+  p.queue.map(q=>`<tr><td><b>#${q.position}</b></td><td>${q.models.join(', ')}</td><td>${q.waiting_sec}ث</td></tr>`).join('')+'</table>':'<span class="mut">الطابور فارغ — كل الطلبات تُنفذ فوراً.</span>';
+ }catch(e){}}
+async function importCsv(){try{const r=await api('/api/accounts/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv:$('csvbox').value})});
+ $('impout').textContent=`✅ أُضيف ${r.added} — متخطى: ${r.skipped_lines.join(',')||'لا شيء'}`;$('csvbox').value='';loadStatus();loadPool()}catch(e){$('impout').textContent='❌ '+e.message}}
+async function bulkGo(){const f={};if($('bprov').value)f.provider=$('bprov').value;if($('btag').value.trim())f.tag=$('btag').value.trim();
+ try{const r=await api('/api/accounts/bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filter:f,action:$('bact').value,value:+$('bval').value})});
+ $('bout').textContent=`✅ طُبق على ${r.affected} حساب`;loadStatus();loadPool()}catch(e){$('bout').textContent='❌ '+e.message}}
 async function toggleAcc(id,en){await api(`/api/accounts/${id}/${en?'enable':'disable'}`,{method:'POST'});loadStatus()}
 async function refreshAcc(id){await api(`/api/accounts/${id}/refresh`,{method:'POST'});loadStatus()}
 function bubble(role,text,src){const d=document.createElement('div');d.className='msg '+(role==='u'?'u':'a');const t=document.createElement('span');t.textContent=text;d.appendChild(t);
@@ -152,7 +187,7 @@ async function send(){const q=$('qin').value.trim();if(!q)return;$('qin').value=
  }catch(e){ab.firstChild.textContent='❌ '+e.message}
  loadStatus();loadLogs();loadBrain()}
 $('qin').addEventListener('keydown',e=>{if(e.key==='Enter')send()});
-loadAll();setInterval(()=>{loadStatus();loadBrain()},3000);
+loadAll();setInterval(()=>{loadStatus();loadBrain();loadPool()},3000);
 </script>
 </body>
 </html>

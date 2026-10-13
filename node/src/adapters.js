@@ -24,6 +24,10 @@ const tokenOf = (account) => {
   } catch { return ''; }
 };
 
+// مهلة صارمة: أي upstream معلّق يُجهض خلال 30s حتى لا يحجز فتحة للأبد
+const fetchUp = (url, opts = {}, ms = 30_000) =>
+  fetch(url, { ...opts, signal: opts.signal || AbortSignal.timeout(ms) });
+
 const promptOf = (messages) =>
   messages.map((m) => `[${m.role || 'user'}]: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join('\n');
 
@@ -53,7 +57,7 @@ class DeepSeekAdapter extends BaseAdapter {
   constructor() { super('deepseek', 'DeepSeek (ds2api + Chat2API)'); }
   async *chat(account, messages, model) {
     const token = tokenOf(account);
-    const res = await fetch('https://chat.deepseek.com/api/v0/chat/completion', {
+    const res = await fetchUp('https://chat.deepseek.com/api/v0/chat/completion', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json', Origin: 'https://chat.deepseek.com', Referer: 'https://chat.deepseek.com/',
@@ -81,7 +85,7 @@ class ChatGPTAdapter extends BaseAdapter {
       yield '[وضع المتصفح] لا يوجد accessToken. أضفه من https://chatgpt.com/api/auth/session أو استخدم Demo.';
       return;
     }
-    const res = await fetch('https://chatgpt.com/backend-api/conversation', {
+    const res = await fetchUp('https://chatgpt.com/backend-api/conversation', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, messages, stream: true }),
@@ -103,19 +107,19 @@ class QwenAdapter extends BaseAdapter {
       return;
     }
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Origin: 'https://chat.qwen.ai', Referer: 'https://chat.qwen.ai/' };
-    const cr = await fetch('https://chat.qwen.ai/api/v2/chats/new', { method: 'POST', headers, body: JSON.stringify({ model }) });
+    const cr = await fetchUp('https://chat.qwen.ai/api/v2/chats/new', { method: 'POST', headers, body: JSON.stringify({ model }) });
     if (cr.status === 429) throw new RateLimited();
     if ([401, 403].includes(cr.status)) throw new UpstreamError('qwen token expired', cr.status);
     let chatId = '';
     try { chatId = (await cr.json()).data?.id || ''; } catch { /* */ }
-    const res = await fetch('https://chat.qwen.ai/api/v2/chat/completions', {
+    const res = await fetchUp('https://chat.qwen.ai/api/v2/chat/completions', {
       method: 'POST', headers,
       body: JSON.stringify({ chat_id: chatId, model, prompt: promptOf(messages), stream: true }),
     });
     if (res.status === 429) throw new RateLimited();
     if (!res.ok) throw new UpstreamError(`qwen http ${res.status}`, res.status);
     yield* sseTexts(res);
-    if (chatId) fetch('https://chat.qwen.ai/api/v2/chats/delete', { method: 'POST', headers, body: JSON.stringify({ chat_id: chatId }) }).catch(() => {});
+    if (chatId) fetchUp('https://chat.qwen.ai/api/v2/chats/delete', { method: 'POST', headers, body: JSON.stringify({ chat_id: chatId }) }).catch(() => {});
   }
 }
 
@@ -135,7 +139,7 @@ class WebAIAdapter extends BaseAdapter {
   async *chat(account, messages) {
     const engine = process.env.WEBAI_ENGINE_URL || '';
     if (engine) {
-      const res = await fetch(`${engine}/v1/chat/completions`, {
+      const res = await fetchUp(`${engine}/v1/chat/completions`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: 'auto', messages, stream: false }),
       });

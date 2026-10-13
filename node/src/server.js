@@ -1,5 +1,5 @@
-// Ai-Free Node Gateway — zero-dependency HTTP server + smart pipeline.
-// Pipeline: cache → dedup → route(score+breaker) → lock → upstream → learn → cooldown → audit
+// Ai-Free Node Gateway — zero-dependency HTTP server + smart pipeline + pressure pool.
+// Pipeline: cache → dedup → route(score+breaker+slots) → queue → upstream → learn → cooldown → audit
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
@@ -12,15 +12,21 @@ import { openStore } from './store.js';
 import { isReady, markUsed, refreshStatus, remainingSeconds } from './cooldown.js';
 import { getNextAccount, scoreAccount, statusSummary, supports } from './router.js';
 import { breakerFail, breakerStatus, breakerSuccess, breakerAllow, cacheKey, dedupRun, needsPrewarm, observeProvider, tunedBase } from './brain.js';
+import { Pool, parseAccountsCsv } from './pool.js';
 import { getAdapter, listAdapters, RateLimited, UpstreamError } from './adapters.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const store = openStore(settings.dataDir);
-const busy = new Set(); // account locks (IN_USE)
-const counters = { requests: 0, cacheHits: 0, deduped: 0, fallbacks: 0 };
+let store = openStore(settings.dataDir);
+// عزل الاختبارات: تبديل المخزن بعد الاستيراد (config يُقيّم مرة واحدة)
+export function setStore(s) { store = s; seedDemo(); }
+// 🏊 مجمع الضغط: سقف RPM افتراضي لكل مزود من التحليل
+export const pool = new Pool(Object.fromEntries(
+  Object.entries(PROVIDER_DEFAULTS).map(([k, v]) => [k, v.maxRpm || 30])));
+const counters = { requests: 0, cacheHits: 0, deduped: 0, fallbacks: 0, queued: 0 };
 
 // Demo seed للتجربة الفورية
-if (!store.listAccounts().length) {
+function seedDemo() {
+  if (store.listAccounts().length) return;
   store.upsertAccount({
     id: 'acc_demo_01', provider: 'demo', label: 'Demo Account 1',
     credentials_enc: encrypt(settings.masterKey, JSON.stringify({ token: 'demo-local' })),
@@ -28,23 +34,26 @@ if (!store.listAccounts().length) {
     consecutive_fails: 0, last_used_at: 0, success_count: 0, fail_count: 0,
     avg_latency_ms: 300, health_score: 1, quota_remaining: 100000,
     priority: 1, models: ['auto', 'deepseek-chat', 'qwen-max', 'gpt-4o-mini', 'gemini-2.5-flash'], enabled: true,
+    max_concurrency: 99, weight: 1, tags: ['demo'],
   });
 }
+seedDemo();
 
 export const expandModel = (m) => VIRTUAL_MODELS[m] || [m];
 const sse = (o) => 'data: ' + JSON.stringify(o) + '\n\n';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ranked unlocked candidates
-function ranked(model) {
+// المرشحون المرتبون الجاهزون فعلاً (نقاط + فتحات + تباعد + سقف مزود)
+function rankFor(model) {
   const now = Date.now() / 1000;
   return store.listAccounts()
-    .map(refreshStatus)
-    .filter((a) => supports(a, model) && isReady(a, now) && !busy.has(a.id) && breakerAllow(a.provider))
+    .map((a) => refreshStatus(a, now))
+    .filter((a) => supports(a, model) && isReady(a, now) && pool.canStart(a))
     .map((a) => ({ a, s: scoreAccount(a, now) }))
     .filter((x) => x.s >= 0)
     .sort((x, y) => y.s - x.s);
 }
+pool.setSelector((models) => rankFor(models[0]));
 
 async function collectUpstream(acc, model, messages) {
   const adapter = getAdapter(acc.provider);
@@ -74,45 +83,55 @@ const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
 
 function log(e) { store.addLog(e); }
 
-// ---- core pipeline: returns { kind:'ok', full, account, provider, cooldown, cached } or throws ----
+// ---- core pipeline: يُعيد النتيجة أو null (ثم الطابور/429) ----
 async function executeOnce(model, messages, requestId, t0, stream, onEvent) {
   for (const candidate of expandModel(model)) {
-    let cands = ranked(candidate);
+    let cands = rankFor(candidate);
     let tried = 0;
     while (cands.length && tried <= settings.maxRetries) {
       const { a: acc } = cands.shift();
       tried += 1;
-      busy.add(acc.id);
+      if (!pool.acquire(acc)) { cands = rankFor(candidate); continue; } // امتلأت الفتحة لحظياً
+      store.touchStart(acc.id); // تباعد + حصة يومية
       store.updateFields(acc.id, { status: 'IN_USE' });
       try {
-        // dedup لغير المتدفق فقط (المتدفق يُنفذ مباشرة ليبقى حياً)
-        let full, latencyMs, deduped = false;
-        if (!stream) {
-          const key = cacheKey(candidate, messages);
-          const { promise, deduped: dd } = dedupRun(key, () => collectUpstream({ ...acc, status: 'IN_USE' }, candidate, messages));
-          deduped = dd;
-          if (dd) counters.deduped += 1;
-          ({ full, latencyMs } = await promise);
-        } else {
-          const r = await collectUpstreamWithEvents({ ...acc, status: 'IN_USE' }, candidate, messages, onEvent);
-          full = r.full; latencyMs = r.latencyMs;
-        }
-        const upd = onSuccess(acc, candidate, latencyMs);
-        store.cacheSet(cacheKey(candidate, messages), candidate, full);
-        busy.delete(acc.id);
-        log({ request_id: requestId, model_requested: model, model_resolved: candidate, provider: acc.provider, account_id: acc.id, queue_wait_ms: Math.round(Date.now() - t0), upstream_latency_ms: latencyMs, cooldown_applied: upd.cooldown_seconds, cached: 0, success: 1, error: '' });
-        return { full, account: acc, provider: acc.provider, model: candidate, cooldown: upd.cooldown_seconds, deduped };
-      } catch (err) {
-        busy.delete(acc.id);
-        const { upd, code } = onFailure(acc, err);
-        log({ request_id: requestId, model_requested: model, model_resolved: candidate, provider: acc.provider, account_id: acc.id, queue_wait_ms: 0, upstream_latency_ms: 0, cooldown_applied: upd.cooldown_seconds, cached: 0, success: 0, error: String(err?.message || err).slice(0, 300) });
-        if (code === 429 || tried > settings.maxRetries) break; // جرّب المرشح التالي (fallback)
-        cands = ranked(candidate); // أعد التقييم بعد الفشل
+        return await runWithAccount(acc, candidate, messages, stream, onEvent, requestId, t0, model);
+      } catch (e) {
         counters.fallbacks += 1;
+        cands = rankFor(candidate); // أعد التقييم بعد الفشل (حساب أخف ضغطاً)
       }
     }
   }
   return null;
+}
+
+// الفتحة محجوزة مسبقاً من المتصل — تُحرر في finally دائماً (لا ضغط عالق)
+async function runWithAccount(acc, candidate, messages, stream, onEvent, requestId, t0, modelReq) {
+  try {
+    // dedup لغير المتدفق فقط (المتدفق يُنفذ مباشرة ليبقى حياً)
+    let full, latencyMs, deduped = false;
+    if (!stream) {
+      const key = cacheKey(candidate, messages);
+      const { promise, deduped: dd } = dedupRun(key, () => collectUpstream({ ...acc, status: 'IN_USE' }, candidate, messages));
+      deduped = dd;
+      if (dd) counters.deduped += 1;
+      ({ full, latencyMs } = await promise);
+    } else {
+      const r = await collectUpstreamWithEvents({ ...acc, status: 'IN_USE' }, candidate, messages, onEvent);
+      full = r.full; latencyMs = r.latencyMs;
+    }
+    const upd = onSuccess(acc, candidate, latencyMs);
+    store.cacheSet(cacheKey(candidate, messages), candidate, full);
+    log({ request_id: requestId, model_requested: modelReq, model_resolved: candidate, provider: acc.provider, account_id: acc.id, queue_wait_ms: Math.round(Date.now() - t0), upstream_latency_ms: latencyMs, cooldown_applied: upd.cooldown_seconds, cached: 0, success: 1, error: '' });
+    return { full, account: acc, provider: acc.provider, model: candidate, cooldown: upd.cooldown_seconds, deduped };
+  } catch (err) {
+    const { upd, code } = onFailure(acc, err);
+    if (code === 429) pool.on429(acc.provider); // تقليص تكيفي لسقف المزود
+    log({ request_id: requestId, model_requested: modelReq, model_resolved: candidate, provider: acc.provider, account_id: acc.id, queue_wait_ms: 0, upstream_latency_ms: 0, cooldown_applied: upd.cooldown_seconds, cached: 0, success: 0, error: String(err?.message || err).slice(0, 300) });
+    throw err; // fallback للمرشح التالي
+  } finally {
+    pool.release(acc.id);
+  }
 }
 
 async function collectUpstreamWithEvents(acc, model, messages, onEvent) {
@@ -143,7 +162,16 @@ function readBody(req, limit = 2 * 1024 * 1024) {
 const publicAcc = (a) => {
   const now = Date.now() / 1000;
   const r = refreshStatus(a, now);
-  return { ...r, credentials_enc: undefined, ready: isReady(r, now), remaining: remainingSeconds(r, now), prewarm: needsPrewarm(r, now) };
+  return {
+    ...r, credentials_enc: undefined,
+    ready: isReady(r, now) && pool.canStart(r),
+    remaining: remainingSeconds(r, now), prewarm: needsPrewarm(r, now),
+    inflight: pool.slotCount(r.id), rpm: pool.accountRpm(r.id),
+  };
+};
+const avgLatencyOf = (accs) => {
+  const lats = accs.map((a) => a.avg_latency_ms || 0).filter((x) => x > 0);
+  return lats.length ? Math.round(lats.reduce((s, x) => s + x, 0) / lats.length) : 5000;
 };
 
 // ---------------- routes ----------------
@@ -167,9 +195,24 @@ async function handler(req, res) {
     return json(res, 200, { object: 'list', data: [...seen].sort().map(([id, p]) => ({ id, object: 'model', owned_by: p })) });
   }
   if (req.method === 'GET' && path === '/api/providers') {
-    return json(res, 200, Object.entries(PROVIDER_DEFAULTS).map(([id, v]) => ({ id, label: v.label, models: v.models, base_cooldown: v.baseCooldown, auth_type: v.authType })));
+    return json(res, 200, Object.entries(PROVIDER_DEFAULTS).map(([id, v]) => ({ id, label: v.label, models: v.models, base_cooldown: v.baseCooldown, max_concurrency: v.maxConcurrency, max_rpm: v.maxRpm || 30, auth_type: v.authType })));
   }
   if (req.method === 'GET' && path === '/api/adapters') return json(res, 200, listAdapters());
+  if (req.method === 'GET' && path === '/api/pool/status') {
+    const accs = store.listAccounts();
+    const p = pool.pressure(accs.map((a) => refreshStatus(a)), remainingSeconds, avgLatencyOf(accs));
+    p.queue = pool.ordered().map((t) => ({ id: t.id, models: t.models, priority: t.priority, waiting_sec: Math.round((Date.now() - t.enqueuedAt) / 1000), position: pool.position(t.id) }));
+    p.caps = Object.fromEntries(pool.caps);
+    p.defaults = Object.fromEntries(Object.entries(PROVIDER_DEFAULTS).map(([k, v]) => [k, v.maxRpm || 30]));
+    return json(res, 200, p);
+  }
+  if (req.method === 'GET' && path === '/api/accounts/export') {
+    // تصدير آمن بدون بيانات الاعتماد (للمشاركة/النسخ)
+    return json(res, 200, store.listAccounts().map((a) => {
+      const { credentials_enc, ...safe } = publicAcc(a);
+      return safe;
+    }));
+  }
   if (req.method === 'GET' && path === '/api/accounts/status') {
     const accs = store.listAccounts();
     return json(res, 200, { ...statusSummary(accs), accounts: accs.map(publicAcc) });
@@ -198,8 +241,50 @@ async function handler(req, res) {
     return res.end([
       `gateway_requests_total ${counters.requests}`, `gateway_cache_hits_total ${c.totalHits}`,
       `gateway_deduped_total ${counters.deduped}`, `gateway_accounts_ready ${s.ready}`,
-      `gateway_accounts_cooldown ${s.cooldown}`, `gateway_breakers_open ${Object.values(breakerStatus()).filter((x) => x === 'open').length}`,
+      `gateway_accounts_cooldown ${s.cooldown}`, `gateway_queue_depth ${pool.depth}`,
+      `gateway_breakers_open ${Object.values(breakerStatus()).filter((x) => x === 'open').length}`,
     ].join('\n') + '\n');
+  }
+
+  // ---- bulk: استيراد جماعي CSV + عمليات جماعية ----
+  if (req.method === 'POST' && path === '/api/accounts/import') {
+    const b = JSON.parse(await readBody(req, 5 * 1024 * 1024));
+    const { rows, errors } = parseAccountsCsv(String(b.csv || ''));
+    let added = 0;
+    const skipped = [...errors];
+    rows.forEach((r, i) => {
+      const d = PROVIDER_DEFAULTS[r.provider];
+      if (!d) { skipped.push(i + 1); return; }
+      store.upsertAccount({
+        provider: r.provider, label: r.label || `${d.label} #${added + 1}`,
+        credentials_enc: encrypt(settings.masterKey, JSON.stringify({ token: r.token })),
+        status: 'READY', cooldown_until: 0,
+        cooldown_seconds: r.base_cooldown || d.baseCooldown,
+        base_cooldown: r.base_cooldown || d.baseCooldown,
+        consecutive_fails: 0, last_used_at: 0, success_count: 0, fail_count: 0,
+        avg_latency_ms: 0, health_score: 1, quota_remaining: 1000,
+        priority: r.priority ?? 5, models: d.models, enabled: true,
+        max_concurrency: d.maxConcurrency || 1, weight: 1, tags: r.tags || [],
+      });
+      added += 1;
+    });
+    return json(res, 200, { added, skipped_lines: skipped });
+  }
+  if (req.method === 'POST' && path === '/api/accounts/bulk') {
+    const b = JSON.parse(await readBody(req));
+    const filter = b.filter || {};
+    const ALL = ['enable', 'disable', 'delete', 'set_priority', 'set_weight', 'set_cooldown', 'set_quota', 'set_spacing'];
+    if (!ALL.includes(b.action)) return json(res, 400, { error: `unknown action (use ${ALL})` });
+    if (b.action === 'delete') {
+      const all = store.listAccounts().filter((a) =>
+        (!filter.provider || a.provider === filter.provider) && (!filter.tag || (a.tags || []).includes(filter.tag)));
+      let n = 0;
+      for (const a of all) if (store.deleteAccount(a.id)) n += 1;
+      return json(res, 200, { action: b.action, affected: n });
+    }
+    const fields = { enable: { enabled: true, status: 'READY', consecutive_fails: 0 }, disable: { enabled: false, status: 'DISABLED' } }[b.action]
+      || { set_priority: { priority: Number(b.value ?? 5) }, set_weight: { weight: Number(b.value ?? 1) }, set_cooldown: { base_cooldown: Number(b.value ?? 15) }, set_quota: { daily_quota: Number(b.value ?? 0) }, set_spacing: { min_spacing: Number(b.value ?? 0) } }[b.action];
+    return json(res, 200, { action: b.action, affected: store.bulkUpdate(filter, fields) });
   }
 
   // ---- accounts CRUD ----
@@ -214,8 +299,22 @@ async function handler(req, res) {
       base_cooldown: b.base_cooldown || d.baseCooldown, consecutive_fails: 0, last_used_at: 0,
       success_count: 0, fail_count: 0, avg_latency_ms: 0, health_score: 1, quota_remaining: 1000,
       priority: b.priority ?? 5, models: b.models || d.models, enabled: true,
+      max_concurrency: b.max_concurrency || d.maxConcurrency || 1,
+      daily_quota: b.daily_quota || 0, min_spacing: b.min_spacing || 0,
+      weight: b.weight ?? 1, tags: b.tags || [],
     });
     return json(res, 200, publicAcc(acc));
+  }
+  const mPatch = path.match(/^\/api\/accounts\/([^/]+)$/);
+  if (mPatch && req.method === 'PATCH') {
+    // ضبط الضغط لكل حساب: priority/weight/models/tags/daily_quota/min_spacing/max_concurrency/label/base_cooldown
+    const b = JSON.parse(await readBody(req));
+    const allowed = ['label', 'priority', 'weight', 'models', 'tags', 'daily_quota', 'min_spacing', 'max_concurrency', 'base_cooldown'];
+    const fields = Object.fromEntries(Object.entries(b).filter(([k]) => allowed.includes(k)));
+    if (!Object.keys(fields).length) return json(res, 400, { error: `allowed: ${allowed}` });
+    const a = store.updateFields(mPatch[1], fields);
+    if (!a) return json(res, 404, { error: 'not found' });
+    return json(res, 200, publicAcc(a));
   }
   const mAcc = path.match(/^\/api\/accounts\/([^/]+)(\/(enable|disable|refresh))?$/);
   if (mAcc) {
@@ -279,7 +378,7 @@ async function handler(req, res) {
     let r = await attempt();
     if (r) return finishChat(res, stream, requestId, r);
 
-    // 3) لا يوجد حساب: انتظار ذكي أو fallback نهائي
+    // 3) لا يوجد حساب فوري: طابور عادل (FIFO بالأولوية) أو 429 مع backpressure
     const waits = cands0.map((c) => getNextAccount(store.listAccounts(), c).wait).filter((w) => w !== null);
     const wait = waits.length ? Math.min(...waits) : null;
     if (wait === null) {
@@ -287,23 +386,51 @@ async function handler(req, res) {
       return json(res, 429, { error: { message: 'لا يوجد حساب يدعم هذا النموذج.', type: 'no_account', request_id: requestId } });
     }
     if (allowWait && wait <= 20) {
-      if (!stream) { // non-stream: انتظر ثم أعد (يغطي كل المرشحين)
-        await sleep((wait + 1) * 1000);
-        r = await executeOnce(model, messages, requestId, t0, false, null);
+      counters.queued += 1;
+      const priority = Number(body.priority || 0);
+      if (!stream) {
+        // non-stream: تذكرة طابور ثم تنفيذ (بدون إغراق الحسابات بالpolling)
+        const ticket = pool.enqueue({ models: cands0, priority, requestId });
+        const got = await ticket.promise; // تُحل عند التعيين أو انتهاء المهلة (25s)
+        if (!got) {
+          log({ request_id: requestId, model_requested: model, model_resolved: '', provider: '', account_id: '', queue_wait_ms: 25000, upstream_latency_ms: 0, cooldown_applied: 0, cached: 0, success: 0, error: 'queue_timeout' });
+          return json(res, 429, { error: { message: 'الطابور ممتلئ/المهلة طالت. أعد المحاولة.', type: 'queue_timeout', request_id: requestId } });
+        }
+        store.touchStart(got.a.id);
+        store.updateFields(got.a.id, { status: 'IN_USE' });
+        r = await runWithAccount(got.a, got.model || cands0[0], messages, false, null, requestId, t0, model);
         if (r) return finishChat(res, false, requestId, r);
       } else {
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'X-Request-Id': requestId });
         res.write(sse({ type: 'waiting', request_id: requestId, retry_in: wait, message: `⏳ أقرب حساب جاهز بعد ${wait} ثانية... (انتظار ذكي)` }));
-        for (let i = 0; i < wait + 3; i += 1) {
-          await sleep(1000);
-          if (ranked(expandModel(model)[0]).length) break;
+        const ticket = pool.enqueue({ models: cands0, priority, requestId });
+        let assigned = null;
+        ticket.promise.then((a) => { assigned = a; });
+        const startT = Date.now();
+        let lastPos = -1;
+        while (Date.now() - startT < 25000 && !assigned) {
+          const pos = pool.position(ticket.id);
+          if (pos !== null && pos !== lastPos) {
+            lastPos = pos;
+            res.write(sse({ type: 'queued', request_id: requestId, position: pos, message: `⏳ دورك رقم ${pos} في الطابور — لا تُغرق الحسابات، دورك محفوظ` }));
+          }
+          await Promise.race([ticket.promise, sleep(1000)]);
         }
-        let done = false;
-        r = await executeOnce(model, messages, requestId, t0, true, async (delta) => {
-          res.write(sse({ id: requestId, object: 'chat.completion.chunk', model, choices: [{ delta: { content: delta }, index: 0 }] }));
-        });
-        if (r) { finishStream(res, requestId, r); done = true; }
-        if (!done) res.write(sse({ error: 'still_no_account', request_id: requestId }));
+        if (!assigned) {
+          pool.dequeue(ticket.id);
+          res.write(sse({ error: 'still_no_account', request_id: requestId }));
+          return res.end();
+        }
+        // الفتحة محجوزة من pump — نفّذ ثم حرر
+        store.touchStart(assigned.a.id);
+        store.updateFields(assigned.a.id, { status: 'IN_USE' });
+        try {
+          r = await runWithAccount(assigned.a, assigned.model || cands0[0], messages, true, async (delta) => {
+            res.write(sse({ id: requestId, object: 'chat.completion.chunk', model, choices: [{ delta: { content: delta }, index: 0 }] }));
+          }, requestId, t0, model);
+        } catch { r = null; }
+        if (r) finishStream(res, requestId, r);
+        else res.write(sse({ error: 'upstream_failed_fallback_exhausted', request_id: requestId }));
         return res.end();
       }
     }
@@ -335,6 +462,7 @@ export function start(port = settings.port, host = settings.host) {
   const server = createServer((req, res) => handler(req, res).catch((e) => {
     try { json(res, 500, { error: String(e?.message || e) }); } catch { /* */ }
   }));
+  server.on('close', () => pool.stop());
   return new Promise((resolve) => {
     server.listen(port, host, () => resolve({ server, url: `http://${host}:${server.address().port}` }));
   });

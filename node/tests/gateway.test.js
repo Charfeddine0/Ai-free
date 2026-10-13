@@ -7,6 +7,7 @@ import { scoreAccount, getNextAccount } from '../src/router.js';
 import { encrypt, decrypt } from '../src/crypto.js';
 import { normalizePrompt, cacheKey, breakerAllow, breakerFail, breakerSuccess, observeProvider } from '../src/brain.js';
 import { VIRTUAL_MODELS } from '../src/config.js';
+import { openStore } from '../src/store.js';
 
 const mk = (id = 'a1', over = {}) => ({
   id, provider: 'demo', label: id, status: 'READY', cooldown_until: 0,
@@ -91,9 +92,9 @@ describe('crypto', () => {
 describe('http integration', () => {
   let base, ctx;
   before(async () => {
-    process.env.DATA_DIR = '/tmp/aifree_node_test_' + Date.now();
-    process.env.PORT = '0';
+    const dir = '/tmp/aifree_node_test_' + Date.now() + '_' + process.pid;
     const srv = await import('../src/server.js');
+    srv.setStore(openStore(dir)); // عزل كامل: مخزن خاص بهذا التشغيل
     const r = await srv.start(0, '127.0.0.1');
     ctx = r; base = r.url;
   });
@@ -126,5 +127,31 @@ describe('http integration', () => {
     assert.ok(b.cache && b.counters);
     const m = await (await fetch(base + '/metrics')).text();
     assert.ok(m.includes('gateway_requests_total'));
+  });
+  it('pool status shows pressure + caps', async () => {
+    const p = await (await fetch(base + '/api/pool/status')).json();
+    assert.ok(Array.isArray(p.accounts));
+    assert.ok(p.byProvider && typeof p.etaSec === 'number');
+    assert.ok(Array.isArray(p.recommendations));
+    assert.ok(p.caps && p.queueDepth !== undefined);
+  });
+  it('bulk import CSV adds many accounts gently', async () => {
+    const csv = ['deepseek,Bulk-1,tok1,15,5,team-a', 'deepseek,Bulk-2,tok2,15,5,team-a', 'nope'].join('\n');
+    const r = await fetch(base + '/api/accounts/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ csv }) });
+    const j = await r.json();
+    assert.equal(j.added, 2);
+    assert.ok(j.skipped_lines.length >= 1);
+    const st = await (await fetch(base + '/api/accounts/status')).json();
+    assert.ok(st.accounts.some((a) => a.label === 'Bulk-1' && a.max_concurrency === 1));
+  });
+  it('PATCH tunes pressure per account + bulk disable by tag', async () => {
+    const accs = await (await fetch(base + '/api/accounts')).json();
+    const target = accs.find((a) => a.label === 'Bulk-1');
+    const pr = await fetch(base + '/api/accounts/' + target.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ weight: 2.5, daily_quota: 50, min_spacing: 5 }) });
+    assert.equal((await pr.json()).weight, 2.5);
+    const bk = await fetch(base + '/api/accounts/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filter: { tag: 'team-a' }, action: 'disable' }) });
+    assert.equal((await bk.json()).affected, 2);
+    const st = await (await fetch(base + '/api/accounts/status')).json();
+    assert.ok(st.accounts.filter((a) => (a.tags || []).includes('team-a')).every((a) => a.status === 'DISABLED'));
   });
 });

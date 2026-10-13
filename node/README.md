@@ -23,11 +23,29 @@ node src/server.js        # أو من الجذر: bash scripts/run-node.sh
 # http://127.0.0.1:8080
 ```
 
-## الاختبارات (15/15 ✅)
+## الاختبارات (30/30 ✅)
 
 ```bash
 cd node && npm test   # node --test فقط، بدون تنزيل شيء
 ```
+
+## 🏊 إدارة الكثير من الحسابات بدون ضغط (الجديد)
+
+| الآلية | أين | التفاصيل |
+|---|---|---|
+| فتحات تزامن | `src/pool.js` + عمود `max_concurrency` | كل حساب له N فتحات (DeepSeek=1، GPT=2...) — الممتلئ يُتجاوز تلقائياً لحساب أخف |
+| تباعد إجباري | `min_spacing` (ثوانٍ) | فجوة دنيا بين بدايات الطلبات على نفس الحساب — يمنع القصف |
+| سقف RPM للمزود | `maxRpm` + `pool.caps` | سقف طلبات/دقيقة لكل مزود، **يتقلص تلقائياً عند 429 ويتعافى تدريجياً** |
+| حصة يومية | `daily_quota`/`used_today` | تُصفّر تلقائياً كل يوم؛ المستنفد يُستبعد من التوجيه |
+| أوزان + وسوم | `weight`/`tags` | وزن يدوي في التسجيل + تجميع بالوسوم للعمليات الجماعية |
+| طابور عادل | `pool.enqueue/pump` | أولوية + FIFO، بثّ `queued {position}` حياً، مهلة 25s (backpressure بدل الإغراق) |
+| نقاط ضغط | `/api/pool/status` | 0-100 لكل حساب/مزود + ETA + **توصيات تلقائية** ("أضف حسابات deepseek") |
+| استيراد CSV | `POST /api/accounts/import` | `provider,label,token,cooldown,priority,tags` — سطر لكل حساب |
+| عمليات جماعية | `POST /api/accounts/bulk` | enable/disable/delete/priority/weight/cooldown/quota/spacing حسب المزود أو الوسم |
+| ضبط فردي | `PATCH /api/accounts/:id` | أي حقل ضغط لحساب واحد |
+| تصدير آمن | `GET /api/accounts/export` | بدون بيانات الاعتماد |
+
+مهلات خارجية صارمة (30s) على كل upstream حتى لا يحجز حساب معلّق فتحة للأبد.
 
 ## البنية
 

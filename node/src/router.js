@@ -1,6 +1,10 @@
 // Routing Engine — scoring مركّب + circuit breaker + دعم النماذج الافتراضية.
 import { isReady, refreshStatus, remainingSeconds } from './cooldown.js';
 import { breakerAllow } from './brain.js';
+import { todayKey } from './store.js';
+
+export const dailyExhausted = (a) =>
+  a && (a.daily_quota || 0) > 0 && a.quota_day === todayKey() && (a.used_today || 0) >= a.daily_quota;
 
 export const supports = (a, model) =>
   !a.models?.length || a.models.includes(model) || a.models.includes('auto');
@@ -9,6 +13,7 @@ export function scoreAccount(a, now = Date.now() / 1000) {
   a = refreshStatus(a, now);
   if (!isReady(a, now)) return -1;
   if ((a.quota_remaining || 0) <= 0) return -1;
+  if (dailyExhausted(a)) return -1; // الحصة اليومية انتهت → لا ضغط عليه اليوم
   if (!breakerAllow(a.provider)) return -1;
   let s = (a.priority / 10) * 30;
   const tot = a.success_count + a.fail_count;
@@ -17,6 +22,7 @@ export function scoreAccount(a, now = Date.now() / 1000) {
   s += Math.max(0, 15 - (a.avg_latency_ms || 1000) / 1000);
   s += Math.min(10, (now - (a.last_used_at || 0)) / 60);
   if ((a.quota_remaining || 0) > 20) s += 5;
+  s *= (a.weight || 1); // وزن يدوي: ارفع الحسابات القوية واخفض الضعيفة
   return Math.round((s + Math.random() * 1.5) * 100) / 100;
 }
 

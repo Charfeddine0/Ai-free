@@ -21,7 +21,11 @@ export function openStore(dataDir) {
       fail_count INTEGER DEFAULT 0, avg_latency_ms INTEGER DEFAULT 0,
       health_score REAL DEFAULT 1.0, quota_remaining INTEGER DEFAULT 1000,
       priority INTEGER DEFAULT 5, models TEXT DEFAULT '[]',
-      enabled INTEGER DEFAULT 1, created_at REAL DEFAULT 0, updated_at REAL DEFAULT 0);
+      enabled INTEGER DEFAULT 1, created_at REAL DEFAULT 0, updated_at REAL DEFAULT 0,
+      max_concurrency INTEGER DEFAULT 1, daily_quota INTEGER DEFAULT 0,
+      used_today INTEGER DEFAULT 0, quota_day TEXT DEFAULT '',
+      min_spacing INTEGER DEFAULT 0, last_started_at REAL DEFAULT 0,
+      weight REAL DEFAULT 1.0, tags TEXT DEFAULT '[]');
     CREATE TABLE IF NOT EXISTS audit_logs(
       id TEXT PRIMARY KEY, request_id TEXT, model_requested TEXT, model_resolved TEXT,
       provider TEXT, account_id TEXT, queue_wait_ms INTEGER DEFAULT 0,
@@ -33,13 +37,26 @@ export function openStore(dataDir) {
       provider TEXT PRIMARY KEY, ema_latency REAL DEFAULT 1000, r429_rate REAL DEFAULT 0,
       tuned_cooldown INTEGER DEFAULT 0, samples INTEGER DEFAULT 0, updated_at REAL DEFAULT 0);
   `);
+  // ترحيل قواعد البيانات القديمة: أعمدة إدارة الضغط
+  const have = new Set(db.prepare('PRAGMA table_info(accounts)').all().map((c) => c.name));
+  for (const [col, def] of [
+    ['max_concurrency', 'INTEGER DEFAULT 1'], ['daily_quota', 'INTEGER DEFAULT 0'],
+    ['used_today', 'INTEGER DEFAULT 0'], ['quota_day', "TEXT DEFAULT ''"],
+    ['min_spacing', 'INTEGER DEFAULT 0'], ['last_started_at', 'REAL DEFAULT 0'],
+    ['weight', 'REAL DEFAULT 1.0'], ['tags', "TEXT DEFAULT '[]'"],
+  ]) {
+    if (!have.has(col)) db.exec(`ALTER TABLE accounts ADD COLUMN ${col} ${def}`);
+  }
   return new Store(db);
 }
+
+export const todayKey = () => new Date().toISOString().slice(0, 10);
 
 const row = (r) => {
   if (!r) return null;
   const d = { ...r };
   try { d.models = JSON.parse(d.models || '[]'); } catch { d.models = []; }
+  try { d.tags = JSON.parse(d.tags || '[]'); } catch { d.tags = []; }
   d.enabled = !!d.enabled;
   return d;
 };
@@ -58,17 +75,20 @@ class Store {
     const now = this.now();
     acc = { id: 'acc_' + randomUUID().slice(0, 8), ...acc };
     if (Array.isArray(acc.models)) acc.models = JSON.stringify(acc.models);
+    if (Array.isArray(acc.tags)) acc.tags = JSON.stringify(acc.tags);
     acc.updated_at = now;
     if (!acc.created_at) acc.created_at = now;
-    const cols = ['id','provider','label','credentials_enc','status','cooldown_until','cooldown_seconds','base_cooldown','consecutive_fails','last_used_at','success_count','fail_count','avg_latency_ms','health_score','quota_remaining','priority','models','enabled','created_at','updated_at'];
+    const cols = ['id','provider','label','credentials_enc','status','cooldown_until','cooldown_seconds','base_cooldown','consecutive_fails','last_used_at','success_count','fail_count','avg_latency_ms','health_score','quota_remaining','priority','models','enabled','created_at','updated_at','max_concurrency','daily_quota','used_today','quota_day','min_spacing','last_started_at','weight','tags'];
     const vals = cols.map((k) => acc[k] ?? null);
     this.db.prepare(`INSERT INTO accounts (${cols}) VALUES (${cols.map(() => '?')})
       ON CONFLICT(id) DO UPDATE SET ${cols.filter((c) => c !== 'id').map((c) => `${c}=excluded.${c}`)}`).run(...vals);
     return this.getAccount(acc.id);
   }
   updateFields(id, fields) {
-    if (Array.isArray(fields.models)) fields = { ...fields, models: JSON.stringify(fields.models) };
-    fields = { ...fields, updated_at: this.now() };
+    fields = { ...fields };
+    if (Array.isArray(fields.models)) fields.models = JSON.stringify(fields.models);
+    if (Array.isArray(fields.tags)) fields.tags = JSON.stringify(fields.tags);
+    fields.updated_at = this.now();
     const keys = Object.keys(fields);
     if (!keys.length) return this.getAccount(id);
     this.db.prepare(`UPDATE accounts SET ${keys.map((k) => `${k}=?`)} WHERE id=?`).run(...keys.map((k) => fields[k]), id);
@@ -76,6 +96,30 @@ class Store {
   }
   deleteAccount(id) {
     return this.db.prepare('DELETE FROM accounts WHERE id=?').run(id).changes > 0;
+  }
+  bulkUpdate(predicate, fields) {
+    // predicate: {provider?, tag?} — عمليات جماعية لتخفيف الضغط
+    const all = this.listAccounts();
+    const hit = all.filter((a) =>
+      (!predicate.provider || a.provider === predicate.provider) &&
+      (!predicate.tag || (a.tags || []).includes(predicate.tag)));
+    for (const a of hit) this.updateFields(a.id, fields);
+    return hit.length;
+  }
+  // بداية استخدام: تباعد + حصة يومية (تُصفّر تلقائياً كل يوم)
+  touchStart(id) {
+    const a = this.getAccount(id);
+    if (!a) return null;
+    const day = todayKey();
+    const patch = { last_started_at: this.now() };
+    if (a.quota_day !== day) { patch.quota_day = day; patch.used_today = 0; }
+    if ((a.daily_quota || 0) > 0) patch.used_today = (a.quota_day === day ? a.used_today : 0) + 1;
+    return this.updateFields(id, patch);
+  }
+  dailyExhausted(a) {
+    if (!a || !(a.daily_quota > 0)) return false;
+    if (a.quota_day !== todayKey()) return false; // يوم جديد → حصة جديدة
+    return (a.used_today || 0) >= a.daily_quota;
   }
   addLog(e) {
     const cols = ['id','request_id','model_requested','model_resolved','provider','account_id','queue_wait_ms','upstream_latency_ms','cooldown_applied','cached','success','error','created_at'];
